@@ -1,0 +1,29 @@
+{
+    "estimation_window": 50,
+    "min_trading_days": 25,
+    "max_clusters": 10,
+    "top_stocks": 3,
+    "tier": 1,
+    "first_allocation": 0.04,
+    "adding_allocation": 0.02,
+    "correlation_threshold": 0.6,
+    "initial_capital": 10000000000,
+    "position_size": 0.04,
+    "risk_free_rate": 0.05,
+    "trading_days": 252,
+    "total_fee_ratio": 0.0,
+    "min_periods": 25,
+    "confidence_level": 0.05,
+    "initial_hedge_ratio": 1.0,
+    "initial_variance": 1.0,
+    "process_variance": 0.01,
+    "observation_variance": 0.1,
+    "prior_params": {
+        "hedge_ratio": {"mean": 1.0, "std": 0.5},
+        "mean_reversion": {"alpha": 2.0, "beta": 0.1},
+        "volatility": {"alpha": 1.0, "beta": 0.1}
+    },
+    "n_samples": 10000,
+    "burn_in": 1000
+}
+

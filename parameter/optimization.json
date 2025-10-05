@@ -1,0 +1,10 @@
+{
+    "estimation_window": 50,
+    "min_trading_days": 25,
+    "max_clusters": 10,
+    "top_stocks": 3,
+    "tier": 1,
+    "first_allocation": 0.4,
+    "adding_allocation": 0.2,
+    "correlation_threshold": 0.6
+  }
