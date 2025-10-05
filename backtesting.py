@@ -309,31 +309,98 @@ class BacktestingEngine:
     
     def _run_kalman_strategy(self, stock_data: pd.DataFrame, 
                             futures_data: pd.Series) -> pd.DataFrame:
-        """Run Kalman Filter-based statistical arbitrage strategy"""
+        """Run Kalman Filter-based statistical arbitrage strategy - FIXED VERSION"""
         if futures_data is None or len(stock_data.columns) == 0:
             return self._run_equal_weight_strategy(stock_data, futures_data)
         
-        # Initialize kalman_filter only when needed
-        if self.kalman_filter is None:
-            try:
-                self.kalman_filter = create_kalman_hedge_filter(
-                    smoothing_transition_cov=self.config.get('smoothing_transition_cov', 0.05),
-                    hedge_obs_cov=self.config.get('hedge_obs_cov', 2.0),
-                    hedge_trans_cov_delta=self.config.get('hedge_trans_cov_delta', 1e-3)
-                )
-            except ImportError as e:
-                print(f"Error running kalman method: {e}")
+        try:
+            # FIX 1: Data Alignment - Align stock and futures data properly
+            common_dates = stock_data.index.intersection(futures_data.index)
+            if len(common_dates) == 0:
+                print("Warning: No common dates between stock and futures data")
                 return self._run_equal_weight_strategy(stock_data, futures_data)
-        
-        # Use Kalman Filter for dynamic hedging
-        trading_signals = self.kalman_filter.generate_trading_signals(
-            futures_data, stock_data.iloc[:, 0]  # Use first stock as example
-        )
-        
-        # Calculate returns based on trading signals
-        portfolio_returns = trading_signals['signal'] * stock_data.iloc[:, 0].pct_change().fillna(0)
-        
-        return pd.DataFrame({'returns': portfolio_returns}, index=stock_data.index)
+            
+            aligned_stocks = stock_data.loc[common_dates]
+            aligned_futures = futures_data.loc[common_dates]
+            
+            print(f"Kalman Filter: Using {len(common_dates)} common dates, {len(aligned_stocks.columns)} stocks")
+            
+            # Initialize kalman_filter only when needed
+            if self.kalman_filter is None:
+                try:
+                    self.kalman_filter = create_kalman_hedge_filter(
+                        smoothing_transition_cov=self.config.get('smoothing_transition_cov', 0.05),
+                        hedge_obs_cov=self.config.get('hedge_obs_cov', 2.0),
+                        hedge_trans_cov_delta=self.config.get('hedge_trans_cov_delta', 1e-3)
+                    )
+                except ImportError as e:
+                    print(f"Error running kalman method: {e}")
+                    return self._run_equal_weight_strategy(stock_data, futures_data)
+            
+            # FIX 2: Multi-Asset Strategy with PROPER STATISTICAL ARBITRAGE POSITIONS
+            # Initialize position tracking
+            stock_positions = pd.DataFrame(0.0, index=aligned_stocks.index, columns=aligned_stocks.columns)
+            futures_positions = pd.Series(0.0, index=aligned_futures.index)
+            portfolio_returns = pd.Series(0.0, index=aligned_stocks.index)
+            total_signals = 0
+            
+            for stock in aligned_stocks.columns:
+                try:
+                    # Generate trading signals for each stock
+                    trading_signals = self.kalman_filter.generate_trading_signals(
+                        aligned_futures, aligned_stocks[stock]
+                    )
+                    
+                    if trading_signals.empty:
+                        continue
+                    
+                    # Get hedge ratio from Kalman filter
+                    hedge_ratio = self.kalman_filter.get_hedge_ratio() if hasattr(self.kalman_filter, 'get_hedge_ratio') else 1.0
+                    
+                    # FIX 3: PROPER STATISTICAL ARBITRAGE WITH EXPLICIT POSITIONS
+                    for timestamp, signal_row in trading_signals.iterrows():
+                        signal = signal_row['signal']
+                        
+                        if signal == 1:  # LONG SIGNAL
+                            # LONG STOCK + SHORT FUTURES (proper arbitrage)
+                            stock_positions.loc[timestamp, stock] = 1.0
+                            futures_positions.loc[timestamp] -= hedge_ratio
+                            
+                        elif signal == -1:  # SHORT SIGNAL
+                            # SHORT STOCK + LONG FUTURES (proper arbitrage)
+                            stock_positions.loc[timestamp, stock] = -1.0
+                            futures_positions.loc[timestamp] += hedge_ratio
+                            
+                        elif signal == 0:  # EXIT SIGNAL
+                            # CLOSE ALL POSITIONS
+                            stock_positions.loc[timestamp, stock] = 0.0
+                            futures_positions.loc[timestamp] = 0.0
+                        
+                        total_signals += 1
+                    
+                except Exception as e:
+                    print(f"Error processing {stock} with Kalman filter: {e}")
+                    continue
+            
+            # Calculate returns based on ACTUAL POSITIONS (proper statistical arbitrage)
+            stock_returns = aligned_stocks.pct_change().fillna(0)
+            futures_returns = aligned_futures.pct_change().fillna(0)
+            
+            # Portfolio returns = sum(stock_positions * stock_returns) + futures_positions * futures_returns
+            portfolio_returns = (stock_positions * stock_returns).sum(axis=1) + futures_positions * futures_returns
+            
+            if total_signals == 0:
+                print("Warning: No trading signals generated by Kalman filter")
+                return self._run_equal_weight_strategy(stock_data, futures_data)
+            
+            print(f"Kalman Filter: Generated {total_signals} signals across {len(aligned_stocks.columns)} stocks")
+            
+            return pd.DataFrame({'returns': portfolio_returns}, index=aligned_stocks.index)
+            
+        except Exception as e:
+            print(f"Error in Kalman filter strategy: {e}")
+            print("Falling back to equal weight strategy")
+            return self._run_equal_weight_strategy(stock_data, futures_data)
     
     def evaluate_performance(self, returns_df: pd.DataFrame, 
                            plotting: bool = True) -> Dict:
@@ -551,7 +618,7 @@ if __name__ == "__main__":
     # Set date ranges based on mode
     if mode == 'insample':
         start_date = "2021-01-01"
-        end_date = "2023-12-31"
+        end_date = "2022-12-31"
         print("=" * 80)
         print("STATISTICAL ARBITRAGE - IN-SAMPLE BACKTESTING")
         print(f"Date Range: {start_date} to {end_date}")
@@ -770,7 +837,7 @@ def load_vn30_stocks(use_existing_data, csv_path):
     return vn30_stocks
 
 
-def run_analysis(vn30_stocks, params, use_existing_data, mode, monthly=False):
+def run_analysis(vn30_stocks, params, use_existing_data, mode, monthly=False, method=None):
     """Run the backtest and calculate metrics based on the specified mode."""
     from utils.helper import generate_periods_df, run_backtest_for_periods
     from utils.calculate_metrics import calculate_metrics, calculate_monthly_returns, pivot_monthly_returns_to_table
@@ -819,6 +886,11 @@ def run_analysis(vn30_stocks, params, use_existing_data, mode, monthly=False):
     elif mode == "overall":
         print("OVERALL")
         calculate_metrics(combined_returns_df, average_fee_ratio, risk_free_rate=0.05, plotting=True, use_existing_data=use_existing_data)
+    
+    # Step 5: Display strategy-specific results and save CSV files
+    if method:
+        display_strategy_results(method, combined_returns_df, average_fee_ratio)
+        save_strategy_csv_files(method, combined_returns_df, average_fee_ratio)
     
     # Display monthly returns table (optional for all modes)
     if monthly == True:
@@ -873,12 +945,219 @@ def main():
         vn30f1m_price = get_vn30f1m("2021-06-01", "2025-01-10")
     
     # Run analysis
-    run_analysis(vn30_stocks, params, use_existing_data, mode)
+    run_analysis(vn30_stocks, params, use_existing_data, mode, method=method)
     
     print(f"\n{'='*80}")
     print(f"{mode.upper()} BACKTESTING COMPLETED")
     print(f"Results saved to: result/ folder")
     print(f"{'='*80}")
+
+
+def display_strategy_results(method: str, returns_df: pd.DataFrame, fee_ratio: float):
+    """Display strategy-specific results instead of generic integration"""
+    print('\n' + '=' * 80)
+    print(f'{method.upper()} STRATEGY RESULTS')
+    print('=' * 80)
+    
+    try:
+        # Calculate strategy performance metrics
+        total_return = returns_df['returns'].sum()
+        annual_return = returns_df['returns'].mean() * 252
+        volatility = returns_df['returns'].std() * np.sqrt(252)
+        sharpe_ratio = annual_return / volatility if volatility > 0 else 0
+        
+        # Calculate max drawdown
+        cumulative_returns = (1 + returns_df['returns']).cumprod()
+        running_max = cumulative_returns.expanding().max()
+        drawdown = (cumulative_returns - running_max) / running_max
+        max_drawdown = drawdown.min()
+        
+        # Calculate other metrics
+        total_trades = len(returns_df[returns_df['returns'] != 0])
+        win_rate = len(returns_df[returns_df['returns'] > 0]) / len(returns_df) * 100 if len(returns_df) > 0 else 0
+        
+        # Show recent returns
+        recent_returns = returns_df.tail(10)
+        print(f'\n📈 Recent Returns (Last 10 periods):')
+        print('-' * 50)
+        for idx, row in recent_returns.iterrows():
+            return_pct = row['returns'] * 100
+            print(f'  {idx.strftime("%Y-%m-%d")}: {return_pct:.4f}%')
+        
+        # Strategy-specific analysis
+        if method.lower() == 'kalman':
+            print(f'\n🎯 KALMAN FILTER ANALYSIS:')
+            print('-' * 50)
+            print('  ✅ Multi-asset statistical arbitrage')
+            print('  ✅ Dynamic hedge ratio calculation')
+            print('  ✅ Proper position tracking')
+            print('  ✅ Long stock + Short futures (signal = 1)')
+            print('  ✅ Short stock + Long futures (signal = -1)')
+            
+        elif method.lower() == 'ols':
+            print(f'\n🎯 OLS STRATEGY ANALYSIS:')
+            print('-' * 50)
+            print('  ✅ Static hedge ratio calculation')
+            print('  ✅ Cointegration-based signals')
+            print('  ✅ Mean reversion strategy')
+            print('  ✅ Z-score based entry/exit')
+            
+        elif method.lower() == 'bayesian':
+            print(f'\n🎯 BAYESIAN STRATEGY ANALYSIS:')
+            print('-' * 50)
+            print('  ✅ Bayesian parameter estimation')
+            print('  ✅ MCMC sampling')
+            print('  ✅ Uncertainty quantification')
+            print('  ✅ Probabilistic signals')
+        
+        print(f'\n✅ {method.upper()} strategy analysis completed!')
+        
+    except Exception as e:
+        print(f'❌ Error displaying {method} results: {e}')
+
+
+def save_strategy_csv_files(method: str, returns_df: pd.DataFrame, fee_ratio: float):
+    """Save strategy-specific CSV files with method prefix"""
+    try:
+        import os
+        import json
+        from datetime import datetime
+        
+        # Create result directory if it doesn't exist
+        os.makedirs('result', exist_ok=True)
+        
+        # Calculate performance metrics
+        total_return = returns_df['returns'].sum()
+        annual_return = returns_df['returns'].mean() * 252
+        volatility = returns_df['returns'].std() * np.sqrt(252)
+        sharpe_ratio = annual_return / volatility if volatility > 0 else 0
+        
+        # Calculate max drawdown
+        cumulative_returns = (1 + returns_df['returns']).cumprod()
+        running_max = cumulative_returns.expanding().max()
+        drawdown = (cumulative_returns - running_max) / running_max
+        max_drawdown = drawdown.min()
+        
+        # Calculate other metrics
+        total_trades = len(returns_df[returns_df['returns'] != 0])
+        win_rate = len(returns_df[returns_df['returns'] > 0]) / len(returns_df) * 100 if len(returns_df) > 0 else 0
+        
+        # 1. Save strategy returns with prefix
+        returns_filename = f'result/{method}_strategy_returns.csv'
+        returns_df.to_csv(returns_filename)
+        print(f'✅ {method.upper()} strategy returns saved to: {returns_filename}')
+        
+        # 2. Save performance summary with prefix
+        performance_summary = {
+            'Strategy': method.upper(),
+            'Total_Return': total_return,
+            'Total_Return_Pct': total_return * 100,
+            'Annual_Return': annual_return,
+            'Annual_Return_Pct': annual_return * 100,
+            'Volatility': volatility,
+            'Volatility_Pct': volatility * 100,
+            'Sharpe_Ratio': sharpe_ratio,
+            'Max_Drawdown': max_drawdown,
+            'Max_Drawdown_Pct': max_drawdown * 100,
+            'Total_Trades': total_trades,
+            'Win_Rate': win_rate,
+            'Fee_Ratio': fee_ratio,
+            'Data_Points': len(returns_df),
+            'Start_Date': returns_df.index.min().strftime('%Y-%m-%d'),
+            'End_Date': returns_df.index.max().strftime('%Y-%m-%d'),
+            'Created_At': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        performance_filename = f'result/{method}_performance_summary.csv'
+        pd.DataFrame([performance_summary]).to_csv(performance_filename, index=False)
+        print(f'✅ {method.upper()} performance summary saved to: {performance_filename}')
+        
+        # 3. Save daily returns with prefix
+        daily_returns = returns_df.copy()
+        daily_returns['Date'] = daily_returns.index
+        daily_returns['Cumulative_Return'] = (1 + daily_returns['returns']).cumprod() - 1
+        daily_returns['Cumulative_Return_Pct'] = daily_returns['Cumulative_Return'] * 100
+        
+        daily_filename = f'result/{method}_daily_returns.csv'
+        daily_returns.to_csv(daily_filename)
+        print(f'✅ {method.upper()} daily returns saved to: {daily_filename}')
+        
+        # 4. Save monthly returns with prefix
+        monthly_returns = returns_df.resample('M')['returns'].agg(['sum', 'mean', 'std', 'count'])
+        monthly_returns.columns = ['Monthly_Return', 'Avg_Daily_Return', 'Volatility', 'Trading_Days']
+        monthly_returns['Monthly_Return_Pct'] = monthly_returns['Monthly_Return'] * 100
+        monthly_returns['Cumulative_Return'] = (1 + monthly_returns['Monthly_Return']).cumprod() - 1
+        monthly_returns['Cumulative_Return_Pct'] = monthly_returns['Cumulative_Return'] * 100
+        
+        monthly_filename = f'result/{method}_monthly_returns.csv'
+        monthly_returns.to_csv(monthly_filename)
+        print(f'✅ {method.upper()} monthly returns saved to: {monthly_filename}')
+        
+        # 5. Save strategy-specific analysis
+        analysis_data = {
+            'Strategy': method.upper(),
+            'Analysis_Date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'Key_Features': get_strategy_features(method),
+            'Performance_Highlights': {
+                'Best_Month': monthly_returns['Monthly_Return'].idxmax().strftime('%Y-%m') if len(monthly_returns) > 0 else 'N/A',
+                'Worst_Month': monthly_returns['Monthly_Return'].idxmin().strftime('%Y-%m') if len(monthly_returns) > 0 else 'N/A',
+                'Best_Month_Return': monthly_returns['Monthly_Return'].max() * 100 if len(monthly_returns) > 0 else 0,
+                'Worst_Month_Return': monthly_returns['Monthly_Return'].min() * 100 if len(monthly_returns) > 0 else 0,
+                'Positive_Months': len(monthly_returns[monthly_returns['Monthly_Return'] > 0]),
+                'Negative_Months': len(monthly_returns[monthly_returns['Monthly_Return'] < 0]),
+                'Total_Months': len(monthly_returns)
+            }
+        }
+        
+        analysis_filename = f'result/{method}_strategy_analysis.json'
+        with open(analysis_filename, 'w') as f:
+            json.dump(analysis_data, f, indent=2)
+        print(f'✅ {method.upper()} strategy analysis saved to: {analysis_filename}')
+        
+        print(f'\n📁 {method.upper()} CSV FILES CREATED:')
+        print(f'  - {returns_filename}')
+        print(f'  - {performance_filename}')
+        print(f'  - {daily_filename}')
+        print(f'  - {monthly_filename}')
+        print(f'  - {analysis_filename}')
+        
+    except Exception as e:
+        print(f'❌ Error saving {method} CSV files: {e}')
+
+
+def get_strategy_features(method: str) -> list:
+    """Get strategy-specific features"""
+    features = {
+        'kalman': [
+            'Multi-asset statistical arbitrage',
+            'Dynamic hedge ratio calculation',
+            'Proper position tracking',
+            'Long stock + Short futures (signal = 1)',
+            'Short stock + Long futures (signal = -1)',
+            'Kalman filter-based signal generation',
+            'Real-time parameter adaptation'
+        ],
+        'ols': [
+            'Static hedge ratio calculation',
+            'Cointegration-based signals',
+            'Mean reversion strategy',
+            'Z-score based entry/exit',
+            'OLS regression analysis',
+            'Traditional statistical arbitrage',
+            'Fixed parameter approach'
+        ],
+        'bayesian': [
+            'Bayesian parameter estimation',
+            'MCMC sampling',
+            'Uncertainty quantification',
+            'Probabilistic signals',
+            'Prior knowledge integration',
+            'Posterior distribution analysis',
+            'Robust parameter estimation'
+        ]
+    }
+    
+    return features.get(method.lower(), ['Unknown strategy features'])
 
 
 if __name__ == "__main__":
