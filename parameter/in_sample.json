@@ -1,4 +1,6 @@
 {
+    "start_date": "2021-01-01",
+    "end_date": "2022-12-31",
     "estimation_window": 20,
     "min_trading_days": 15,
     "max_clusters": 10,
@@ -25,8 +27,12 @@
         "mean_reversion": {"alpha": 2.0, "beta": 0.1},
         "volatility": {"alpha": 1.0, "beta": 0.1}
     },
-    "n_samples": 5000,
-    "burn_in": 500,
+    "n_samples": 100,
+    "burn_in": 50,
     "use_fallback_strategy": true,
-    "fallback_correlation_threshold": 0.2
+    "fallback_correlation_threshold": 0.2,
+    "max_loss_per_trade": 0.02,
+    "take_profit": 0.03,
+    "max_drawdown_limit": 0.15,
+    "max_correlation": 0.8
 }

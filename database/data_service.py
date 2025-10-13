@@ -1,184 +1,211 @@
 """
-Database data service module
+Database data service module - Simplified for statistical arbitrage
 """
 
 import pandas as pd
 import psycopg2
-import time
-from .query import STOCK_PRICE_QUERY, ETF_PRICE_QUERY, FUTURES_PRICE_QUERY, VN30_QUERY
+from .query import DAILY_DATA_QUERY
 from config.config import db_params
 
-# Establish global connection (consider passing as parameter in production)
-CONNECTION = psycopg2.connect(**db_params)
 
-
-def execute_query(query, from_date, to_date):
-    """Execute a database query with date range parameters.
-
-    Args:
-        query (str): SQL query with %s placeholders for dates.
-        from_date (str): Start date in 'YYYY-MM-DD' format.
-        to_date (str): End date in 'YYYY-MM-DD' format.
-
-    Returns:
-        list: Query results as a list of tuples, or None if an error occurs.
+class DataService:
     """
-    cursor = CONNECTION.cursor()
-    try:
-        cursor.execute(query, (from_date, to_date))
-        result = cursor.fetchall()
-        cursor.close()
-        CONNECTION.commit()
-        return result
-    except Exception as e:
-        print(f"Error: {e}")
-        CONNECTION.rollback()
-        cursor.close()
-        return None
-
-
-def get_stock_price(symbol, start_date, end_date):
-    """Fetch adjusted close prices for a stock from the database.
-
-    Args:
-        symbol (str): Stock ticker symbol (e.g., 'ACB').
-        start_date (str): Start date in 'YYYY-MM-DD' format.
-        end_date (str): End date in 'YYYY-MM-DD' format.
-
-    Returns:
-        pd.DataFrame: DataFrame with 'datetime', 'tickersymbol', 'price' columns,
-                      or None if query fails.
+    Simplified data service for statistical arbitrage
     """
-    cursor = CONNECTION.cursor()
-    try:
-        cursor.execute(STOCK_PRICE_QUERY, (symbol, start_date, end_date))
-        result = cursor.fetchall()
-        cursor.close()
-        CONNECTION.commit()
-        columns = ["datetime", "tickersymbol", "price"]
-        matched = pd.DataFrame(result, columns=columns)
-        matched = matched.astype({"price": float})
-        return matched
-    except Exception as e:
-        print(f"Error: {e}")
-        CONNECTION.rollback()
-        cursor.close()
-        return None
+
+    def __init__(self) -> None:
+        """
+        Initialize database connection
+        """
+        try:
+            if (
+                db_params["host"]
+                and db_params["port"]
+                and db_params["database"]
+                and db_params["user"]
+                and db_params["password"]
+            ):
+                self.connection = psycopg2.connect(**db_params)
+                self.is_file = False
+                print("✅ Database connection established")
+            else:
+                self.connection = None
+                self.is_file = True
+                print("⚠️ Database parameters not configured")
+        except Exception as e:
+            self.connection = None
+            self.is_file = True
+            print(f"⚠️ Database connection failed: {e}")
+
+    def get_daily_data(
+        self,
+        from_date: str,
+        to_date: str,
+    ) -> pd.DataFrame:
+        """
+        Get daily stock data from database
+
+        Args:
+            from_date (str): Start date in 'YYYY-MM-DD' format
+            to_date (str): End date in 'YYYY-MM-DD' format
+
+        Returns:
+            pd.DataFrame: Daily stock data with columns [year, date, tickersymbol, close]
+        """
+        if not self.connection:
+            print("❌ No database connection available")
+            return pd.DataFrame()
+        
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(DAILY_DATA_QUERY, (from_date, to_date))
+
+            queries = list(cursor)
+            cursor.close()
+
+            if not queries:
+                print("❌ No daily data found")
+                return pd.DataFrame()
+
+            columns = ["year", "date", "tickersymbol", "close"]
+            df = pd.DataFrame(queries, columns=columns)
+            print(f"✅ Loaded {len(df)} daily records from database")
+            return df
+            
+        except Exception as e:
+            print(f"❌ Error loading daily data: {e}")
+            return pd.DataFrame()
+
+    def get_close_price(
+        self,
+        from_date: str,
+        to_date: str,
+        contract_type: str,
+    ) -> pd.DataFrame:
+        """
+        Get close price data for futures contracts
+
+        Args:
+            from_date (str): Start date in 'YYYY-MM-DD' format
+            to_date (str): End date in 'YYYY-MM-DD' format
+            contract_type (str): Contract type (e.g., 'VN30F1M')
+
+        Returns:
+            pd.DataFrame: Close price data with columns [datetime, tickersymbol, close]
+        """
+        if not self.connection:
+            print("❌ No database connection available")
+            return pd.DataFrame()
+        
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT c.datetime, c.tickersymbol, c.price
+                FROM quote.close c
+                JOIN quote.futurecontractcode fc 
+                    ON c.datetime = fc.datetime 
+                    AND fc.tickersymbol = c.tickersymbol
+                WHERE fc.futurecode = %s
+                    AND c.datetime BETWEEN %s AND %s
+                ORDER BY c.datetime
+            """, (contract_type, from_date, to_date))
+
+            results = cursor.fetchall()
+            cursor.close()
+
+            if not results:
+                print(f"❌ No close price data found for {contract_type}")
+                return pd.DataFrame()
+
+            df = pd.DataFrame(results, columns=['datetime', 'tickersymbol', 'close'])
+            print(f"✅ Loaded {len(df)} close price records for {contract_type}")
+            return df
+            
+        except Exception as e:
+            print(f"❌ Error loading close price data: {e}")
+            return pd.DataFrame()
+
+    def close_connection(self):
+        """Close database connection"""
+        if self.connection:
+            self.connection.close()
+            print("✅ Database connection closed")
+
+    def __del__(self):
+        """Destructor to close connection"""
+        self.close_connection()
 
 
-def get_etf_price(symbol, start_date, end_date):
-    """Fetch close prices for an ETF from the database.
-
-    Args:
-        symbol (str): ETF ticker symbol (e.g., 'FUEVFVND').
-        start_date (str): Start date in 'YYYY-MM-DD' format.
-        end_date (str): End date in 'YYYY-MM-DD' format.
-
-    Returns:
-        pd.DataFrame: DataFrame with 'datetime', 'tickersymbol', 'price' columns,
-                      or None if query fails.
-    """
-    cursor = CONNECTION.cursor()
-    try:
-        cursor.execute(ETF_PRICE_QUERY, (symbol, start_date, end_date))
-        result = cursor.fetchall()
-        cursor.close()
-        CONNECTION.commit()
-        columns = ["datetime", "tickersymbol", "price"]
-        matched = pd.DataFrame(result, columns=columns)
-        matched = matched.astype({"price": float})
-        return matched
-    except Exception as e:
-        print(f"Error: {e}")
-        CONNECTION.rollback()
-        cursor.close()
-        return None
-
-
+# Standalone functions for backward compatibility
 def get_futures_price(start_date, end_date):
-    """Fetch futures price data for VN30F1M from the database.
-
-    Args:
-        start_date (str): Start date in 'YYYY-MM-DD' format.
-        end_date (str): End date in 'YYYY-MM-DD' format.
-
-    Returns:
-        pd.DataFrame: DataFrame with 'datetime', 'tickersymbol', 'price' columns,
-                      or empty DataFrame if query fails.
     """
-    cursor = CONNECTION.cursor()
-    try:
-        cursor.execute(FUTURES_PRICE_QUERY, (start_date, end_date))
-        result = cursor.fetchall()
-        cursor.close()
-        CONNECTION.commit()
-        columns = ["datetime", "tickersymbol", "price"]
-        matched = pd.DataFrame(result, columns=columns)
-        matched = matched.astype({"price": float})
-        return matched
-    except Exception as e:
-        print(f"Error executing query: {e}")
-        CONNECTION.rollback()
-        cursor.close()
-        return pd.DataFrame(columns=["datetime", "tickersymbol", "price"])
-
+    Get VN30F1M futures price data (backward compatibility)
+    
+    Args:
+        start_date (str): Start date in 'YYYY-MM-DD' format
+        end_date (str): End date in 'YYYY-MM-DD' format
+    
+    Returns:
+        pd.DataFrame: Futures price data
+    """
+    data_service = DataService()
+    return data_service.get_close_price(start_date, end_date, 'VN30F1M')
 
 def get_stock_data(symbols, start_date, end_date):
-    """Fetch stock, ETF, and futures price data for multiple symbols.
-
-    Args:
-        symbols (list): List of ticker symbols (e.g., ['VN30F1M', 'ACB']).
-        start_date (str): Start date in 'YYYY-MM-DD' format.
-        end_date (str): End date in 'YYYY-MM-DD' format.
-
-    Returns:
-        pd.DataFrame: DataFrame with 'Date' index and symbol columns containing prices.
     """
+    Get stock data for specified symbols (backward compatibility)
     
-    stock_data = pd.DataFrame()
+    Args:
+        symbols (list): List of stock symbols
+        start_date (str): Start date in 'YYYY-MM-DD' format
+        end_date (str): End date in 'YYYY-MM-DD' format
+    
+    Returns:
+        pd.DataFrame: Stock data
+    """
+    data_service = DataService()
+    daily_data = data_service.get_daily_data(start_date, end_date)
+    
+    if daily_data.empty:
+        return pd.DataFrame()
+    
+    # Filter for specified symbols
+    filtered_data = daily_data[daily_data['tickersymbol'].isin(symbols)].copy()
+    
+    if filtered_data.empty:
+        return pd.DataFrame()
+    
+    # Process data
+    filtered_data['date'] = pd.to_datetime(filtered_data['date']).dt.date
+    pivot_data = filtered_data.pivot_table(
+        index='date', 
+        columns='tickersymbol', 
+        values='close', 
+        aggfunc='last'
+    )
+    
+    # Ensure all symbols are present
     for symbol in symbols:
-        if symbol == 'VN30F1M':
-            close_price = get_futures_price(start_date, end_date)
-        elif symbol in ['FUEVFVND', 'FUESSVFL', 'E1VFVN30', 'FUEVN100']:
-            close_price = get_etf_price(symbol, start_date, end_date)
-        else:
-            close_price = get_stock_price(symbol, start_date, end_date)
-        
-        if close_price is not None:
-            close_price = close_price[['datetime', 'price']]
-            close_price.set_index('datetime', inplace=True)
-            close_price.rename(columns={'price': symbol}, inplace=True)
-            stock_data = pd.concat([stock_data, close_price], axis=1).dropna()
-        time.sleep(0.5)  # Rate limiting
+        if symbol not in pivot_data.columns:
+            pivot_data[symbol] = None
     
-    stock_data['Date'] = pd.to_datetime(stock_data.index)
-    stock_data = stock_data.set_index('Date').sort_index()
-    return stock_data
-
+    pivot_data = pivot_data[symbols]
+    pivot_data = pivot_data.reset_index()
+    pivot_data['date'] = pd.to_datetime(pivot_data['date'])
+    pivot_data = pivot_data.set_index('date')
+    
+    return pivot_data
 
 def get_vn30(from_date, to_date):
-    """Fetch VN30 data between specified dates from the database.
-
-    Args:
-        from_date (str): Start date in 'YYYY-MM-DD' format.
-        to_date (str): End date in 'YYYY-MM-DD' format.
-
-    Returns:
-        pd.DataFrame: DataFrame with 'Date' index and 'Stock' column, or None if query fails.
     """
-    cursor = CONNECTION.cursor()
-    try:
-        cursor.execute(VN30_QUERY, (from_date, to_date))
-        result = pd.DataFrame(cursor.fetchall())
-        cursor.close()
-        CONNECTION.commit()
-    except Exception as e:
-        print(f"Error: {e}")
-        CONNECTION.rollback()
-        cursor.close()
-        return None
+    Get VN30 index data (backward compatibility)
     
-    result = result.rename(columns={result.columns[0]: 'Date', result.columns[1]: 'Stock'})
-    result_df = result.set_index('Date')
-    result_df.index = pd.to_datetime(result_df.index)
-    return result_df
+    Args:
+        from_date (str): Start date in 'YYYY-MM-DD' format
+        to_date (str): End date in 'YYYY-MM-DD' format
+    
+    Returns:
+        pd.DataFrame: VN30 index data
+    """
+    data_service = DataService()
+    return data_service.get_close_price(from_date, to_date, 'VN30')

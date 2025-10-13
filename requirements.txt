@@ -9,5 +9,5 @@ optuna>=3.0.0
 tabulate>=0.9.0
 plotly>=5.22.0
 python-dotenv
-pymc
+pymc3
 pykalman>=0.9.5

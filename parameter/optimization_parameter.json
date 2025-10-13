@@ -1,0 +1,53 @@
+{
+    "random_seed": 2024,
+    "no_trials": 100,
+    "optimization_params": {
+        "correlation_threshold": {
+            "min": 0.01,
+            "max": 0.5,
+            "step": 0.01,
+            "type": "float"
+        },
+        "max_loss_per_trade": {
+            "min": 0.01,
+            "max": 0.5,
+            "step": 0.01,
+            "type": "float"
+        },
+        "take_profit": {
+            "min": 0.01,
+            "max": 0.5,
+            "step": 0.01,
+            "type": "float"
+        },
+        "position_size": {
+            "min": 0.01,
+            "max": 0.5,
+            "step": 0.01,
+            "type": "float"
+        },
+        "entry_threshold": {
+            "min": 0.01,
+            "max": 0.5,
+            "step": 0.01,
+            "type": "float"
+        },
+        "exit_threshold": {
+            "min": 0.01,
+            "max": 0.5,
+            "step": 0.01,
+            "type": "float"
+        }
+    },
+    "objective": "maximize",
+    "metric": "sharpe_ratio",
+    "early_stopping": {
+        "enabled": true,
+        "patience": 20,
+        "min_delta": 0.001
+    },
+    "validation": {
+        "enabled": true,
+        "validation_split": 0.2
+    }
+}

@@ -1,226 +1,187 @@
 """
-Data loader module for loading and preprocessing financial data
+Load VN30F1 futures and stock_05 data
 """
 
-import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
-from database.data_service import get_stock_data, get_vn30
-from filter.financial import StockFilter
 import os
+import json
+from datetime import datetime
+import pandas as pd
+from database.data_service import DataService
 
-class DataLoader:
-    """
-    Data loader class for handling financial data loading and preprocessing
-    """
-    
-    def __init__(self, start_date: str, end_date: str, 
-                 estimation_window: int = 60, 
-                 correlation_threshold: float = 0.6):
-        """
-        Initialize the data loader
-        
-        Args:
-            start_date (str): Start date in 'YYYY-MM-DD' format
-            end_date (str): End date in 'YYYY-MM-DD' format
-            estimation_window (int): Estimation window for data
-            correlation_threshold (float): Correlation threshold for stock selection
-        """
-        self.start_date = start_date
-        self.end_date = end_date
-        self.estimation_window = estimation_window
-        self.correlation_threshold = correlation_threshold
-        
-        # Initialize stock filter
-        self.stock_filter = StockFilter(correlation_threshold=correlation_threshold)
-        
-        # Data storage
-        self.stock_data = None
-        self.vn30_data = None
-        self.selected_stocks = None
-    
-    def load_stock_data(self, symbols: list = None) -> pd.DataFrame:
-        """
-        Load stock price data for specified symbols
-        
-        Args:
-            symbols (list): List of stock symbols to load
-            
-        Returns:
-            pd.DataFrame: Stock price data
-        """
-        if symbols is None:
-            # Use default symbols
-            symbols = ['VN30F1M', 'VIC', 'VCB', 'VHM', 'VNM', 'BID']
-        
-        print(f"Loading stock data from {self.start_date} to {self.end_date}")
-        self.stock_data = get_stock_data(symbols, self.start_date, self.end_date)
-        
-        print(f"Loaded data shape: {self.stock_data.shape}")
-        print(f"Date range: {self.stock_data.index.min()} to {self.stock_data.index.max()}")
-        
-        return self.stock_data
-    
-    def load_vn30_data(self) -> pd.DataFrame:
-        """
-        Load VN30 data
-        
-        Returns:
-            pd.DataFrame: VN30 data
-        """
-        print(f"Loading VN30 data from {self.start_date} to {self.end_date}")
-        self.vn30_data = get_vn30(self.start_date, self.end_date)
-        
-        if self.vn30_data is not None:
-            print(f"Loaded VN30 data shape: {self.vn30_data.shape}")
-            print(f"Date range: {self.vn30_data.index.min()} to {self.vn30_data.index.max()}")
-        
-        return self.vn30_data
-    
-    def select_arbitrage_stocks(self) -> list:
-        """
-        Select stocks for arbitrage strategy
-        
-        Returns:
-            list: Selected stock symbols
-        """
-        if self.stock_data is None:
-            raise ValueError("Stock data not loaded. Call load_stock_data() first.")
-        
-        # Extract futures data
-        futures_data = self.stock_data['VN30F1M'] if 'VN30F1M' in self.stock_data.columns else None
-        
-        # Select stocks using the filter
-        self.selected_stocks = self.stock_filter.select_arbitrage_stocks(
-            self.stock_data.drop('VN30F1M', axis=1, errors='ignore'),
-            futures_data
-        )
-        
-        print(f"Selected stocks for arbitrage: {self.selected_stocks}")
-        return self.selected_stocks
-    
-    def get_processed_data(self) -> tuple:
-        """
-        Get processed data for strategy
-        
-        Returns:
-            tuple: (stock_data, futures_data, selected_stocks)
-        """
-        if self.stock_data is None:
-            self.load_stock_data()
-        
-        if self.selected_stocks is None:
-            self.select_arbitrage_stocks()
-        
-        # Extract futures data
-        futures_data = self.stock_data['VN30F1M'] if 'VN30F1M' in self.stock_data.columns else None
-        
-        # Filter stock data to selected stocks
-        stock_columns = [col for col in self.selected_stocks if col in self.stock_data.columns]
-        filtered_stock_data = self.stock_data[stock_columns]
-        
-        return filtered_stock_data, futures_data, self.selected_stocks
-    
-    def save_data(self, output_dir: str = "result") -> None:
-        """
-        Save loaded data to files
-        
-        Args:
-            output_dir (str): Output directory for saving data
-        """
-        os.makedirs(output_dir, exist_ok=True)
-        
-        if self.stock_data is not None:
-            stock_file = os.path.join(output_dir, "stock_data.csv")
-            self.stock_data.to_csv(stock_file)
-            print(f"Stock data saved to {stock_file}")
-        
-        if self.vn30_data is not None:
-            vn30_file = os.path.join(output_dir, "vn30_data.csv")
-            self.vn30_data.to_csv(vn30_file)
-            print(f"VN30 data saved to {vn30_file}")
-        
-        if self.selected_stocks is not None:
-            stocks_file = os.path.join(output_dir, "selected_stocks.txt")
-            with open(stocks_file, 'w') as f:
-                f.write('\n'.join(self.selected_stocks))
-            print(f"Selected stocks saved to {stocks_file}")
-    
-    def load_from_files(self, data_dir: str = "result") -> bool:
-        """
-        Load data from previously saved files
-        
-        Args:
-            data_dir (str): Directory containing saved data files
-            
-        Returns:
-            bool: True if data loaded successfully, False otherwise
-        """
-        try:
-            stock_file = os.path.join(data_dir, "stock_data.csv")
-            vn30_file = os.path.join(data_dir, "vn30_data.csv")
-            stocks_file = os.path.join(data_dir, "selected_stocks.txt")
-            
-            if os.path.exists(stock_file):
-                self.stock_data = pd.read_csv(stock_file, index_col=0, parse_dates=True)
-                print(f"Loaded stock data from {stock_file}")
-            
-            if os.path.exists(vn30_file):
-                self.vn30_data = pd.read_csv(vn30_file, index_col=0, parse_dates=True)
-                print(f"Loaded VN30 data from {vn30_file}")
-            
-            if os.path.exists(stocks_file):
-                with open(stocks_file, 'r') as f:
-                    self.selected_stocks = f.read().strip().split('\n')
-                print(f"Loaded selected stocks from {stocks_file}")
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error loading data from files: {e}")
-            return False
+# Load backtesting parameters from JSON file
+with open("parameter/backtesting_parameter.json", 'r', encoding="utf-8") as f:
+    BACKTESTING_CONFIG = json.load(f)
 
+def init_folder(path: str):
+    """Create folder if not exists"""
+    os.makedirs(path, exist_ok=True)
 
-def create_data_loader(start_date: str, end_date: str, 
-                      estimation_window: int = 60,
-                      correlation_threshold: float = 0.6) -> DataLoader:
-    """
-    Factory function to create a DataLoader instance
+def load_vn30f1_data(from_date, to_date, validation=False):
+    """Load VN30F1 futures data"""
+    data_service = DataService()
+    cursor = data_service.connection.cursor()
     
-    Args:
-        start_date (str): Start date in 'YYYY-MM-DD' format
-        end_date (str): End date in 'YYYY-MM-DD' format
-        estimation_window (int): Estimation window for data
-        correlation_threshold (float): Correlation threshold for stock selection
-        
-    Returns:
-        DataLoader: Configured data loader instance
-    """
-    return DataLoader(
-        start_date=start_date,
-        end_date=end_date,
-        estimation_window=estimation_window,
-        correlation_threshold=correlation_threshold
+    print(f"Loading VN30F1 futures data...")
+    print(f"Date range: {from_date} to {to_date}")
+    
+    # Use VN30F1M contract
+    cursor.execute("""
+        SELECT c.datetime, c.price
+        FROM quote.close c
+        JOIN quote.futurecontractcode fc 
+            ON c.datetime = fc.datetime 
+            AND fc.tickersymbol = c.tickersymbol
+        WHERE fc.futurecode = 'VN30F1M'
+            AND c.datetime BETWEEN %s AND %s
+        ORDER BY c.datetime
+    """, (str(from_date), str(to_date)))
+    
+    results = cursor.fetchall()
+    cursor.close()
+    
+    if not results:
+        print("❌ No VN30F1 futures data found")
+        return
+    
+    # Create DataFrame
+    df = pd.DataFrame(results, columns=['datetime', 'close'])
+    df['date'] = pd.to_datetime(df['datetime']).dt.date
+    
+    # Get daily close price
+    daily_close = df.groupby('date')['close'].last().reset_index()
+    daily_close['date'] = pd.to_datetime(daily_close['date'])
+    daily_close = daily_close.set_index('date')
+    daily_close.columns = ['Stock']
+    
+    # Save to file
+    output_path = f"data/os/vn30f1.csv" if validation else f"data/is/vn30f1.csv"
+    daily_close.to_csv(output_path)
+    
+    print(f"✅ Saved VN30F1 data to {output_path}")
+    print(f"   Data shape: {daily_close.shape}")
+    print(f"   Date range: {daily_close.index.min()} to {daily_close.index.max()}")
+
+def load_stock_05_data(from_date, to_date, validation=False):
+    """Load stock data for 5 stocks: VIC, VCB, VHM, VNM, BID"""
+    data_service = DataService()
+    
+    print(f"Loading stock_05 data...")
+    print(f"Date range: {from_date} to {to_date}")
+    
+    # Get daily data
+    daily_data = data_service.get_daily_data(str(from_date), str(to_date))
+    
+    if daily_data.empty:
+        print("❌ No stock data found")
+        return
+    
+    # Filter for target stocks
+    target_stocks = ['VIC', 'VCB', 'VHM', 'VNM', 'BID']
+    filtered_data = daily_data[daily_data['tickersymbol'].isin(target_stocks)].copy()
+    
+    if filtered_data.empty:
+        print("❌ No data found for target stocks")
+        return
+    
+    # Process data
+    filtered_data['date'] = pd.to_datetime(filtered_data['date']).dt.date
+    pivot_data = filtered_data.pivot_table(
+        index='date', 
+        columns='tickersymbol', 
+        values='close', 
+        aggfunc='last'
     )
+    
+    # Ensure all stocks are present
+    for stock in target_stocks:
+        if stock not in pivot_data.columns:
+            pivot_data[stock] = None
+    
+    pivot_data = pivot_data[target_stocks]
+    pivot_data = pivot_data.reset_index()
+    pivot_data['date'] = pd.to_datetime(pivot_data['date'])
+    pivot_data = pivot_data.set_index('date')
+    
+    # Save to file
+    output_path = f"data/os/stock_05.csv" if validation else f"data/is/stock_05.csv"
+    pivot_data.to_csv(output_path)
+    
+    print(f"✅ Saved stock_05 data to {output_path}")
+    print(f"   Data shape: {pivot_data.shape}")
+    print(f"   Date range: {pivot_data.index.min()} to {pivot_data.index.max()}")
 
+def sync_data_dates():
+    """Sync data dates between VN30F1 and stock_05"""
+    
+    for period in ['is', 'os']:
+        
+        # File paths
+        vn30f1_path = f"data/{period}/vn30f1.csv"
+        stock_path = f"data/{period}/stock_05.csv"
+        
+        # Check if files exist
+        if not os.path.exists(vn30f1_path) or not os.path.exists(stock_path):
+            print(f"❌ Files not found for {period}")
+            continue
+            
+        # Load data
+        vn30f1_data = pd.read_csv(vn30f1_path, index_col=0, parse_dates=True)
+        stock_data = pd.read_csv(stock_path, index_col=0, parse_dates=True)
+        
+        # Find common dates
+        common_dates = vn30f1_data.index.intersection(stock_data.index)
+        
+        if len(common_dates) == 0:
+            print(f"   ❌ No common dates found!")
+            continue
+            
+        # Filter both datasets to common dates
+        vn30f1_synced = vn30f1_data.loc[common_dates].sort_index()
+        stock_synced = stock_data.loc[common_dates].sort_index()
+    
+        # Save synced data
+        vn30f1_synced.to_csv(vn30f1_path)
+        stock_synced.to_csv(stock_path)
+        
 
 if __name__ == "__main__":
-    # Example usage
-    loader = create_data_loader(
-        start_date="2021-06-01",
-        end_date="2024-12-31",
-        estimation_window=60,
-        correlation_threshold=0.6
-    )
+    # Create required directories
+    required_directories = [
+        "data",
+        "data/is",
+        "data/os",
+        "result/optimization",
+        "result/backtest",
+    ]
+    for dr in required_directories:
+        init_folder(dr)
     
-    # Load data
-    stock_data = loader.load_stock_data()
-    vn30_data = loader.load_vn30_data()
-    selected_stocks = loader.select_arbitrage_stocks()
+    # Load date ranges from config
+    is_from_date_str = BACKTESTING_CONFIG["is_from_date_str"]
+    is_to_date_str = BACKTESTING_CONFIG["is_end_date_str"]
+    os_from_date_str = BACKTESTING_CONFIG["os_from_date_str"]
+    os_to_date_str = BACKTESTING_CONFIG["os_to_date_str"]
     
-    # Get processed data
-    processed_stocks, futures_data, stocks = loader.get_processed_data()
+    is_from_date = datetime.strptime(is_from_date_str, "%Y-%m-%d").date()
+    is_to_date = datetime.strptime(is_to_date_str, "%Y-%m-%d").date()
+    os_from_date = datetime.strptime(os_from_date_str, "%Y-%m-%d").date()
+    os_to_date = datetime.strptime(os_to_date_str, "%Y-%m-%d").date()
     
-    print(f"Processed data shape: {processed_stocks.shape}")
-    print(f"Futures data shape: {futures_data.shape if futures_data is not None else 'None'}")
-    print(f"Selected stocks: {stocks}")
+    print("🚀 Loading VN30F1 and Stock_05 Data")
+    print("=" * 60)
+    
+    # Load in-sample data
+    print("\n📊 Loading in-sample data...")
+    load_vn30f1_data(is_from_date, is_to_date)
+    load_stock_05_data(is_from_date, is_to_date)
+    
+    # Load out-of-sample data
+    print("\n📊 Loading out-of-sample data...")
+    load_vn30f1_data(os_from_date, os_to_date, validation=True)
+    load_stock_05_data(os_from_date, os_to_date, validation=True)
+    
+    # Sync data dates
+    sync_data_dates()
+    
+    print("\n✅ Data loading completed!")
+    print("=" * 60)

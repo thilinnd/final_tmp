@@ -1,237 +1,365 @@
+"""
+Optimization module for statistical arbitrage strategy
+Uses Optuna to optimize trading parameters
+"""
+
+import json
+import logging
+import os
 import optuna
+from optuna.samplers import TPESampler
+from optuna.pruners import MedianPruner
+from typing import Dict, Any, Tuple
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import random
-import os
-from utils.helper import generate_periods_df, run_backtest_for_periods
-from utils.calculate_metrics import calculate_shapre_and_mdd
-from data.get_data import *
-from optuna.pruners import MedianPruner
-import warnings
-import logging
+from backtesting_fixed import FixedBacktestingEngine
 
-# Set up logging to suppress Optuna's internal messages by default
-# Change to optuna.logging.DEBUG to see detailed logs if needed
-optuna.logging.set_verbosity(optuna.logging.WARNING)  # Suppress to warnings only (INFO and below are hidden)
-# Redirect Optuna logs to Python's logging module at DEBUG level
-optuna.logging.enable_propagation()  # Allow Optuna logs to propagate to Python's logging
-logging.basicConfig(level=logging.WARNING)  # Set default logging level to WARNING (hides DEBUG and INFO)
+class OptunaCallBack:
+    """
+    Optuna callback class for logging optimization results
+    """
 
-pd.set_option('future.no_silent_downcasting', True)
+    def __init__(self, log_file: str = "result/optimization/optimization.log.csv") -> None:
+        """
+        Initialize optuna callback
+        
+        Args:
+            log_file (str): Path to log file
+        """
+        # Create optimization directory if it doesn't exist
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        
+        logging.basicConfig(
+            filename=log_file,
+            format="%(message)s",
+            filemode="w",
+        )
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
+        self.logger = logger
+        
+        # Log header
+        self.logger.info("trial_number,correlation_threshold,max_loss_per_trade,take_profit,position_size,entry_threshold,exit_threshold,sharpe_ratio,total_return,max_drawdown,win_rate")
 
-# Get the directory where the script is located
-script_dir = os.path.dirname(os.path.abspath(__file__))
+    def __call__(self, study: optuna.study.Study, trial: optuna.trial.FrozenTrial) -> None:
+        """
+        Callback function for each trial
+        
+        Args:
+            study: Optuna study object
+            trial: Current trial object
+        """
+        if trial.value is not None:
+            # Extract parameters
+            params = trial.params
+            sharpe_ratio = trial.value
+            
+            # Log trial results
+            self.logger.info(
+                "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s",
+                trial.number,
+                params.get("correlation_threshold", "N/A"),
+                params.get("max_loss_per_trade", "N/A"),
+                params.get("take_profit", "N/A"),
+                params.get("position_size", "N/A"),
+                params.get("entry_threshold", "N/A"),
+                params.get("exit_threshold", "N/A"),
+                sharpe_ratio,
+                "N/A",  # total_return - will be filled by engine
+                "N/A",  # max_drawdown - will be filled by engine
+                "N/A"   # win_rate - will be filled by engine
+            )
 
-# Change the current working directory to the script's directory (project2)
-os.chdir(script_dir)
-
-# Suppress the specific Optuna warning
-warnings.filterwarnings(
-    "ignore",
-    category=UserWarning,
-    module="optuna.distributions"
-)
-
-# Set random seeds for reproducibility
-SEED = 42  # You can choose any integer
-random.seed(SEED)
-np.random.seed(SEED)
-os.environ["PYTHONHASHSEED"] = str(SEED)  # For hash-based operations
-
-vn30_stocks = pd.read_csv('data/vn30_stocks.csv', index_col=0, parse_dates=True)
-# Load data once at the start
-etf_list = ['FUEVFVND', 'FUESSVFL', 'E1VFVN30', 'FUEVN100']
-start_date = '2021-06-01'
-end_date = '2025-01-01'
-periods_df = generate_periods_df(
-    vn30_stocks,
-    start_date,
-    end_date,
-    window=80,
-)
-
-def objective(trial):
-    # Suggest parameters to tune
-    estimation_window = trial.suggest_int("estimation_window", 40, 80, step=10)
-    min_trading_days_fraction = trial.suggest_float(
-        "min_trading_days", 0.5, 0.8, step=0.15
-    )
-    min_trading_days = int(min_trading_days_fraction * estimation_window)  # Convert fraction to days
-    max_clusters = trial.suggest_int("max_clusters", 8, 10, step=2)
-    top_stocks = trial.suggest_int("top_stocks", 3, 9, step=3)
-    correlation_threshold = trial.suggest_float(
-        "correlation_threshold", 0.3, 0.6, step=0.3
-    )
-
-    ou_window = estimation_window  
-    tier = trial.suggest_categorical("tier", [1, 2, 3, 4])
-
-    first_allocation = trial.suggest_float("first_allocation", 0.4, 0.7, step=0.15)
-    adding_allocation = trial.suggest_float("adding_allocation", 0.2, 0.3, step=0.1)
+class StrategyOptimizer:
+    """
+    Strategy optimizer using Optuna
+    """
     
-    # Run backtest with suggested parameters
-    combined_returns_df, _, _ = run_backtest_for_periods(
-        periods_df=periods_df,
-        futures="VN30F1M",
-        etf_list=etf_list,
-        etf_included=False,
-        estimation_window=estimation_window,
-        min_trading_days=min_trading_days_fraction * estimation_window,  # Convert fraction to days
-        max_clusters=max_clusters,
-        top_stocks=top_stocks,
-        correlation_threshold=correlation_threshold,
-        tier=tier,
-        first_allocation=first_allocation,
-        adding_allocation=adding_allocation,
-        use_existing_data=True
-    )
-
-    # Split into train and test sets
-    train_set = combined_returns_df[combined_returns_df.index < "2024-01-01"]
-    test_set = combined_returns_df[combined_returns_df.index >= "2024-01-01"]
-
-    # Calculate metrics for train set (optimization targets)
-    return_train, sharpe_train, max_drawdown_train = calculate_shapre_and_mdd(train_set, risk_free_rate=0.05)
-
-    # Calculate metrics for test set (for reporting, not optimization)
-    return_test, sharpe_test, max_drawdown_test = calculate_shapre_and_mdd(test_set, risk_free_rate=0.05)
-
-    # Store test set metrics for later analysis
-    trial.set_user_attr("sharpe_test", sharpe_test)
-    trial.set_user_attr("return_test", return_test)
-    trial.set_user_attr("max_drawdown_test", max_drawdown_test)
-
-    # Return tuple for multi-objective optimization (maximize return, maximize Sharpe, minimize drawdown)
-    return return_train, sharpe_train, max_drawdown_train
-
-
-# Create study
-study = optuna.create_study(
-    directions=["maximize", "maximize", "minimize"],  # Maximize return, maximize Sharpe, minimize drawdown
-    sampler=optuna.samplers.TPESampler(seed=SEED),
-    study_name="vn30_arbitrage_tuning",
-    load_if_exists=True,
-    pruner=MedianPruner()
-)
-
-# Parameters
-total_trials = 50
-batch_size = 10
-n_batches = total_trials // batch_size  # 5 batches
-
-# CSV file name in data folder
-csv_file = os.path.join(script_dir, "data", "optuna_trials_final_real.csv")
-
-# Ensure the data directory exists
-os.makedirs(os.path.dirname(csv_file), exist_ok=True)
-
-
-# Run trials in batches
-for batch in range(n_batches):
-    # Run one batch of trials
-    study.optimize(objective, n_trials=batch_size)
+    def __init__(self, config_file: str = "parameter/optimization_parameter.json"):
+        """
+        Initialize optimizer
+        
+        Args:
+            config_file (str): Path to optimization config file
+        """
+        self.config = self.load_config(config_file)
+        self.callback = OptunaCallBack()
+        
+    def load_config(self, config_file: str) -> Dict[str, Any]:
+        """Load optimization configuration"""
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return self.get_default_config()
     
-    # Get all trials up to this point
-    trials_df = study.trials_dataframe()
+    def get_default_config(self) -> Dict[str, Any]:
+        """Get default configuration"""
+        return {
+            "random_seed": 2024,
+            "no_trials": 100,
+            "optimization_params": {
+                "correlation_threshold": {"min": 0.01, "max": 0.5, "type": "float"},
+                "max_loss_per_trade": {"min": 0.01, "max": 0.5, "type": "float"},
+                "take_profit": {"min": 0.01, "max": 0.5, "type": "float"},
+                "position_size": {"min": 0.01, "max": 0.5, "type": "float"},
+                "entry_threshold": {"min": 0.01, "max": 0.5, "type": "float"},
+                "exit_threshold": {"min": 0.01, "max": 0.5, "type": "float"}
+            },
+            "objective": "maximize",
+            "metric": "sharpe_ratio"
+        }
     
-    # Rename columns to match your variable names
-    column_mapping = {
-        'values_0': 'Return_train',
-        'values_1': 'Sharpe_train',
-        'values_2': 'Drawdown_train',
-        'user_attrs_sharpe_test': 'Sharpe_test',
-        'user_attrs_return_test': 'Return_test',
-        'user_attrs_max_drawdown_test': 'Drawdown_test',
-    }
+    def suggest_parameters(self, trial: optuna.trial.Trial) -> Dict[str, Any]:
+        """
+        Suggest parameters for a trial
+        
+        Args:
+            trial: Optuna trial object
+            
+        Returns:
+            Dict of suggested parameters
+        """
+        params = {}
+        opt_params = self.config["optimization_params"]
+        
+        for param_name, param_config in opt_params.items():
+            if param_config["type"] == "float":
+                step_size = param_config.get("step", 0.01)
+                params[param_name] = trial.suggest_float(
+                    param_name,
+                    param_config["min"],
+                    param_config["max"],
+                    step=step_size
+                )
+            elif param_config["type"] == "int":
+                step_size = param_config.get("step", 1)
+                params[param_name] = trial.suggest_int(
+                    param_name,
+                    int(param_config["min"]),
+                    int(param_config["max"]),
+                    step=step_size
+                )
+            elif param_config["type"] == "categorical":
+                params[param_name] = trial.suggest_categorical(
+                    param_name,
+                    param_config["choices"]
+                )
+        
+        return params
     
-    # Rename the columns
-    trials_df.rename(columns=column_mapping, inplace=True)
+    def objective(self, trial: optuna.trial.Trial) -> float:
+        """
+        Objective function for optimization
+        
+        Args:
+            trial: Optuna trial object
+            
+        Returns:
+            Sharpe ratio (to be maximized)
+        """
+        try:
+            # Get suggested parameters
+            params = self.suggest_parameters(trial)
+            
+            # Create custom config for this trial
+            custom_config = self.create_custom_config(params)
+            
+            # Create backtesting engine
+            engine = FixedBacktestingEngine(custom_config=custom_config)
+            
+            # Run backtesting (silent mode)
+            import sys
+            from io import StringIO
+            
+            # Capture stdout to suppress prints
+            old_stdout = sys.stdout
+            sys.stdout = StringIO()
+            
+            # Disable plotting and saving for optimization
+            import matplotlib
+            matplotlib.use('Agg')  # Use non-interactive backend
+            import matplotlib.pyplot as plt
+            plt.ioff()  # Turn off interactive mode
+            
+            # Run backtesting silently (no plots)
+            engine.run_fixed_arbitrage_strategy("insample", silent=True)
+            results = engine.get_results()
+            
+            # Restore stdout
+            sys.stdout = old_stdout
+            
+            if results is None or len(results) == 0:
+                return float('-inf')
+            
+            # Calculate Sharpe ratio
+            returns = results['returns']
+            if len(returns) == 0 or returns.std() == 0:
+                return float('-inf')
+            
+            sharpe_ratio = returns.mean() / returns.std() * np.sqrt(252)
+            
+            # Log additional metrics
+            total_return = (1 + returns).prod() - 1
+            max_drawdown = self.calculate_max_drawdown(returns)
+            win_rate = (returns > 0).mean()
+            
+            # Update callback with additional metrics
+            self.callback.logger.info(
+                "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s",
+                trial.number,
+                params.get("correlation_threshold", "N/A"),
+                params.get("max_loss_per_trade", "N/A"),
+                params.get("take_profit", "N/A"),
+                params.get("position_size", "N/A"),
+                params.get("entry_threshold", "N/A"),
+                params.get("exit_threshold", "N/A"),
+                sharpe_ratio,
+                total_return,
+                max_drawdown,
+                win_rate
+            )
+            
+            return sharpe_ratio
+            
+        except Exception as e:
+            # print(f"Error in trial {trial.number}: {e}")
+            return float('-inf')
     
-    # Keep only relevant columns
-    param_columns = [col for col in trials_df.columns if col.startswith('params_')]
-    relevant_columns = ['number', 'Return_train', 'Sharpe_train', 'Drawdown_train', 
-                       'Return_test', 'Sharpe_test', 'Drawdown_test'] + param_columns
-    trials_df = trials_df[relevant_columns]
+    def create_custom_config(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Create custom configuration for backtesting
+        
+        Args:
+            params: Optimization parameters
+            
+        Returns:
+            Custom configuration dictionary
+        """
+        # Load base config
+        with open("parameter/in_sample.json", 'r', encoding='utf-8') as f:
+            base_config = json.load(f)
+        
+        # Update with optimization parameters
+        for param_name, param_value in params.items():
+            if param_name in base_config:
+                base_config[param_name] = param_value
+        
+        return base_config
     
-    # Write or append to CSV (still useful for post-analysis)
-    if batch == 0:
-        trials_df.to_csv(csv_file, mode='w', index=False)
-    else:
-        # Only append the new trials (last batch_size trials)
-        new_trials_df = trials_df.tail(batch_size)
-        new_trials_df.to_csv(csv_file, mode='a', header=False, index=False)
+    def calculate_max_drawdown(self, returns: pd.Series) -> float:
+        """Calculate maximum drawdown"""
+        cumulative = (1 + returns).cumprod()
+        running_max = cumulative.expanding().max()
+        drawdown = (cumulative - running_max) / running_max
+        return drawdown.min()
     
-    # # Print batch progress (commented out for concise logging)
-    # print(f"Batch {batch+1}/{n_batches} completed ({(batch+1)*batch_size}/{total_trials} trials)")
-    # print(f"Latest batch results:")
-    # for _, row in trials_df.tail(batch_size).iterrows():
-    #     print(f"Trial {int(row['number'])}: "
-    #           f"Return Train: {row['Return_train']}, "
-    #           f"Sharpe Train: {row['Sharpe_train']}, "
-    #           f"Drawdown Train: {row['Drawdown_train']}, "
-    #           f"Return Test: {row['Return_test']}, "
-    #           f"Sharpe Test: {row['Sharpe_test']}, "
-    #           f"Drawdown Test: {row['Drawdown_test']}")
-    # print("-" * 50)
+    def _progress_callback(self, study: optuna.study.Study, trial: optuna.trial.FrozenTrial) -> None:
+        """Progress callback to show optimization progress"""
+        if trial.number % 10 == 0 or trial.number == 0:
+            completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+            total = len(study.trials)
+            # print(f"📊 Progress: {completed}/{total} trials completed ({(completed/total)*100:.1f}%)")
+            
+            if completed > 0:
+                best_value = study.best_value
+                # print(f"🏆 Best Sharpe ratio so far: {best_value:.4f}")
+    
+    def optimize(self) -> optuna.study.Study:
+        """
+        Run optimization
+        
+        Returns:
+            Optuna study object with results
+        """
+        # print("🚀 Starting parameter optimization...")
+        # print(f"📊 Number of trials: {self.config['no_trials']}")
+        # print(f"🎯 Objective: {self.config['objective']} {self.config['metric']}")
+        # print(f"🔧 Parameters to optimize: {list(self.config['optimization_params'].keys())}")
+        # print("⏳ Running optimization (silent mode)...")
+        
+        # Create study
+        study = optuna.create_study(
+            sampler=TPESampler(seed=self.config["random_seed"]),
+            direction=self.config["objective"],
+            pruner=MedianPruner(n_startup_trials=10, n_warmup_steps=5)
+        )
+        
+        # Run optimization with progress callback
+        study.optimize(
+            self.objective,
+            n_trials=self.config["no_trials"],
+            callbacks=[self.callback, self._progress_callback]
+        )
+        
+        # Print results (disabled to avoid table display)
+        # self.print_results(study)
+        
+        # Save best parameters
+        self.save_best_parameters(study)
+        
+        return study
+    
+    def print_results(self, study: optuna.study.Study) -> None:
+        """Print optimization results"""
+        print("\n" + "="*60)
+        print("🎯 OPTIMIZATION RESULTS")
+        print("="*60)
+        
+        best_trial = study.best_trial
+        print(f"✅ Best trial: {best_trial.number}")
+        print(f"📈 Best Sharpe ratio: {best_trial.value:.4f}")
+        
+        print(f"\n🔧 Best parameters:")
+        for param, value in best_trial.params.items():
+            print(f"  • {param}: {value:.4f}")
+        
+        print(f"\n📊 Optimization statistics:")
+        print(f"  • Total trials: {len(study.trials)}")
+        print(f"  • Completed trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])}")
+        print(f"  • Failed trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])}")
+        
+        # Show top 5 trials
+        completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None]
+        completed_trials.sort(key=lambda x: x.value, reverse=True)
+        
+        print(f"\n🏆 Top 5 trials:")
+        for i, trial in enumerate(completed_trials[:5]):
+            print(f"  {i+1}. Trial {trial.number}: Sharpe = {trial.value:.4f}")
+    
+    def save_best_parameters(self, study: optuna.study.Study) -> None:
+        """Save best parameters to file"""
+        best_params = study.best_params
+        best_value = study.best_value
+        
+        result = {
+            "best_sharpe_ratio": best_value,
+            "best_parameters": best_params,
+            "optimization_config": self.config,
+            "total_trials": len(study.trials)
+        }
+        
+        # Save to JSON
+        with open("result/optimization/best_parameters.json", 'w', encoding='utf-8') as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+        
+        # print(f"\n💾 Best parameters saved to: result/optimization/best_parameters.json")
 
-# Get and print best trial results (note: with multi-objective, this is one of the Pareto optimal solutions)
-best_trial = study.best_trials[0]  # Get the first Pareto optimal trial
-best_params = best_trial.params
-best_return_train = best_trial.values[0]
-best_sharpe_train = best_trial.values[1]
-best_drawdown_train = best_trial.values[2]
-best_return_test = best_trial.user_attrs["return_test"]
-best_sharpe_test = best_trial.user_attrs["sharpe_test"]
-best_drawdown_test = best_trial.user_attrs["max_drawdown_test"]
+def main():
+    """Main function"""
+    try:
+        # Create optimizer
+        optimizer = StrategyOptimizer()
+        
+        # Run optimization
+        study = optimizer.optimize()
+        
+        print("\n✅ Optimization completed successfully!")
+        
+    except Exception as e:
+        print(f"❌ Error during optimization: {e}")
+        raise
 
-# Only print the final best results
-print("\nFinal Best Results (One of the Pareto Optimal Solutions):")
-print(f"Best Train Return: {best_return_train}")
-print(f"Best Train Sharpe Ratio: {best_sharpe_train}")
-print(f"Best Train Max Drawdown: {best_drawdown_train}")
-print(f"Test Return: {best_return_test}")
-print(f"Test Sharpe Ratio: {best_sharpe_test}")
-print(f"Test Max Drawdown: {best_drawdown_test}")
-print(f"Best Parameters: {best_params}")
-
-# # Visualize parameter importances (for Return only as an example, since it's multi-objective)
-# optuna.visualization.plot_param_importances(study, target=lambda t: t.values[0]).show()
-
-# # Extract Return, Sharpe Ratios, and trial numbers for visualization
-# returns = [trial.values[0] for trial in study.trials if trial.values is not None]
-# sharpe_ratios = [trial.values[1] for trial in study.trials if trial.values is not None]
-# trial_numbers = list(range(len(sharpe_ratios)))
-
-# # Compute the best Return and Sharpe Ratio seen so far for each trial
-# best_return_so_far = []
-# best_sharpe_so_far = []
-# current_best_return = float("-inf")
-# current_best_sharpe = float("-inf")
-# for ret, sharpe in zip(returns, sharpe_ratios):
-#     current_best_return = max(current_best_return, ret)
-#     current_best_sharpe = max(current_best_sharpe, sharpe)
-#     best_return_so_far.append(current_best_return)
-#     best_sharpe_so_far.append(current_best_sharpe)
-
-# # Create the plot for Return
-# plt.figure(figsize=(10, 6))
-# plt.scatter(trial_numbers, returns, color="blue", alpha=0.5, label="Return per Trial")
-# plt.plot(trial_numbers, best_return_so_far, color="red", label="Best Return")
-# plt.xlabel("Trial")
-# plt.ylabel("Return (Objective)")
-# plt.title("Return Over Trials")
-# plt.legend()
-# plt.grid(True)
-# plt.show()
-
-# # Create the plot for Sharpe Ratio
-# plt.figure(figsize=(10, 6))
-# plt.scatter(trial_numbers, sharpe_ratios, color="blue", alpha=0.5, label="Sharpe Ratio per Trial")
-# plt.plot(trial_numbers, best_sharpe_so_far, color="red", label="Best Sharpe Ratio")
-# plt.xlabel("Trial")
-# plt.ylabel("Sharpe Ratio (Objective)")
-# plt.title("Sharpe Ratio Over Trials")
-# plt.legend()
-# plt.grid(True)
-# plt.show()
+if __name__ == "__main__":
+    main()

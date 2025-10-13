@@ -229,7 +229,7 @@ class Metric:
 import os
 import matplotlib.pyplot as plt
 from datetime import datetime
-from database.data_service import get_etf_price
+# ETF price function removed - not needed for statistical arbitrage
 from tabulate import tabulate
 
 
@@ -378,20 +378,33 @@ def calculate_metrics(
             benchmark_df.set_index('datetime', inplace=True)
             benchmark_df.index = pd.to_datetime(benchmark_df.index)
         else:
-            # Fetch benchmark data (assuming get_etf_price is available)
+            # Use VN30F1M as benchmark instead of ETF
+            from data_loader import DataLoader
             start = returns_df.index[0].strftime('%Y-%m-%d')
             end = returns_df.index[-1].strftime('%Y-%m-%d')
-            benchmark_df = get_etf_price('VN30', start, end)
-            benchmark_df.set_index('datetime', inplace=True)
-            benchmark_df.index = pd.to_datetime(benchmark_df.index)
-            if 'price' not in benchmark_df.columns:
-                raise ValueError("Benchmark DataFrame must contain a 'price' column.")
-            # Optionally save to file for future use
-            benchmark_df.to_csv(csv_file)
+            
+            # Create data loader to get VN30 data
+            loader = DataLoader(start, end)
+            vn30_data = loader.load_vn30_data()
+            
+            if not vn30_data.empty:
+                benchmark_df = vn30_data.copy()
+                benchmark_df.columns = ['benchmark']
+                benchmark_df.index = pd.to_datetime(benchmark_df.index)
+                # Optionally save to file for future use
+                benchmark_df.to_csv(csv_file)
+            else:
+                # Fallback to simple benchmark
+                benchmark_df = pd.DataFrame(index=returns_df.index)
+                benchmark_df['benchmark'] = 0.0
 
         # Align and calculate benchmark returns
         benchmark_df = benchmark_df.reindex(returns_df.index, method='ffill')
-        benchmark_returns = benchmark_df['price'].pct_change().fillna(0)
+        if 'benchmark' in benchmark_df.columns:
+            benchmark_returns = benchmark_df['benchmark'].pct_change().fillna(0)
+        else:
+            # Fallback if benchmark column doesn't exist
+            benchmark_returns = pd.Series(0.0, index=returns_df.index)
 
     # Calculate time length
     time_length = (returns_df.index[-1] - returns_df.index[0]).days / 365.25
